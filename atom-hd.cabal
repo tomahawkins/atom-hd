@@ -1,0 +1,34 @@
+name:    atom-hd
+version: 0.0.0
+
+category: Language, Embedded, Hardware
+
+synopsis:    A DSL for hardware design.
+description: A DSL for hardware design.
+author:      Tom Hawkins <tomahawkins@gmail.com>
+maintainer:  Tom Hawkins <tomahawkins@gmail.com>
+
+license:      BSD3
+license-file: LICENSE
+
+homepage: http://tomahawkins.org
+
+build-type:    Simple
+cabal-version: >= 1.8
+
+library
+  build-depends:
+    base       >= 4.0     && < 5,
+    mtl
+
+  exposed-modules:
+    Language.AtomHD
+
+  extensions:
+
+  ghc-options: -W
+
+source-repository head
+  type:     git
+  location: git://github.com/tomahawkins/atom-hd.git
+

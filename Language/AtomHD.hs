@@ -16,24 +16,39 @@ module Language.AtomHD
   , cond
   , (<==)
   -- * Expressions
-  , (%%)
+  , (%)
+  , true
+  , false
   -- * Utilities
   , width
   ) where
 
-import Control.Monad.State
+import Control.Monad.State hiding (guard)
 import Data.Bits
 
-infixl 9 %%
+infixl 9 %
 infixr 1 <==, -:, ==>
 
-type Design = StateT () IO
-type Action = StateT () Design
+type Design = StateT DesignDB IO
+type Action = StateT ActionDB Design
 type Name = String
+
+data DesignDB = DesignDB
+  { nextId :: Int
+  , path   :: [Name]
+  , regs   :: [(Int, ([Name], Int, Integer))]
+  , rules  :: [([Name], E, [(E, E)])]
+  }
+
+data ActionDB = ActionDB
+  { guard   :: E
+  , updates :: [(E, E)]
+  }
 
 -- | Expressions.
 data E
   = EConst Int Integer
+  | EReg Int
   | EAdd E E
   | ESub E E
   | EMul E E
@@ -58,7 +73,7 @@ instance Bits E where
   complement = ENot
   shift  = error "Bits E shift not defined."
   rotate = error "Bits E rotate not defined."
-  bit i = 8 %% (bit i)
+  bit i = 8 % (bit i)
   testBit = error "Bits E testBit not defined."
   bitSize = width
   isSigned _ = False
@@ -74,7 +89,10 @@ cond = undefined
 
 -- | Register declaration.
 reg :: Name -> Int -> Integer -> Design E
-reg = undefined
+reg name width value = do
+  d <- get
+  put d { nextId = nextId d + 1, regs = regs d ++ [(nextId d, (path d ++ [name], width, value))] }
+  return $ EReg $ nextId d
 
 -- | FIFO declaration.
 fifo :: Name -> [(Int, Integer)] -> Design E
@@ -82,24 +100,36 @@ fifo = undefined
 
 -- | Create a scoped namespace.
 (-:) :: Name -> Design a -> Design a
-(-:) = undefined
+name -: design = do
+  modify $ \ d -> d { path = path d ++ [name] }
+  a <- design
+  modify $ \ d -> d { path = init $ path d }
+  return a
 
 -- | Constant bit vector.
-(%%) :: Int -> Integer -> E
-(%%) = EConst
+(%) :: Int -> Integer -> E
+(%) = EConst
 
 -- | Width of a bit vector.
 width :: E -> Int
 width = undefined
 
 -- | Defines a state transition rule.
-(==>) :: Name -> Action a -> Design a
-(==>) = undefined
+(==>) :: Name -> Action () -> Design ()
+name ==> rule = do
+  ActionDB guard updates <- execStateT rule ActionDB { guard = false, updates = [] }
+  modify $ \ d -> d { rules = rules d ++ [(path d ++ [name], guard, updates)] }
 
 -- | Compiles a design.
 compile :: FilePath -> Design () -> IO ()
 compile file design = do
-  _ <- execStateT design ()
+  _ <- execStateT design DesignDB { nextId = 0, path = [], regs = [], rules = [] }
   undefined
   writeFile file undefined
+
+false :: E
+false = 1%0
+
+true :: E
+true = 1%1
 

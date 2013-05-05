@@ -16,6 +16,7 @@ module Language.AtomHD
   , cond
   , (<==)
   -- * Expressions
+  , local
   , (%)
   , true
   , false
@@ -37,6 +38,7 @@ data DesignDB = DesignDB
   { nextId :: Int
   , path   :: [Name]
   , regs   :: [(Int, ([Name], Int, Integer))]
+  , locals :: [(Int, E)]
   , rules  :: [([Name], E, [(E, E)])]
   }
 
@@ -48,14 +50,15 @@ data ActionDB = ActionDB
 -- | Expressions.
 data E
   = EConst Int Integer
-  | EReg Int
-  | EAdd E E
-  | ESub E E
-  | EMul E E
-  | ENot E
-  | EAnd E E
-  | EOr  E E
-  | EXor E E
+  | EReg   Int Int  -- id, width
+  | ELocal Int Int  -- id, width
+  | EAdd   E E
+  | ESub   E E
+  | EMul   E E
+  | ENot   E
+  | EAnd   E E
+  | EOr    E E
+  | EXor   E E
   deriving (Show, Eq)
 
 instance Num E where
@@ -81,18 +84,18 @@ instance Bits E where
 
 -- | State update.
 (<==) :: E -> E -> Action ()
-(<==) = undefined
+a <== b = modify $ \ d -> d { updates = updates d ++ [(a, b)] }
 
 -- | Guard conditions.
 cond :: E -> Action ()
-cond = undefined
+cond a = modify $ \ d -> d { guard = EAnd (guard d) a }
 
 -- | Register declaration.
 reg :: Name -> Int -> Integer -> Design E
 reg name width value = do
   d <- get
   put d { nextId = nextId d + 1, regs = regs d ++ [(nextId d, (path d ++ [name], width, value))] }
-  return $ EReg $ nextId d
+  return $ EReg (nextId d) width
 
 -- | FIFO declaration.
 fifo :: Name -> [(Int, Integer)] -> Design E
@@ -110,9 +113,26 @@ name -: design = do
 (%) :: Int -> Integer -> E
 (%) = EConst
 
+-- | Create a local expression.
+local :: E -> Design E
+local a = do
+  d <- get
+  put d { nextId = nextId d + 1,  locals = locals d ++ [(nextId d, a)] }
+  return $ ELocal (nextId d) (width a)
+
 -- | Width of a bit vector.
 width :: E -> Int
-width = undefined
+width a = case a of
+  EConst w _ -> w
+  EReg   _ w -> w
+  ELocal _ w -> w
+  EAdd   a _ -> width a
+  ESub   a _ -> width a
+  EMul   a _ -> width a
+  ENot   a   -> width a
+  EAnd   a _ -> width a
+  EOr    a _ -> width a
+  EXor   a _ -> width a
 
 -- | Defines a state transition rule.
 (==>) :: Name -> Action () -> Design ()
@@ -123,9 +143,14 @@ name ==> rule = do
 -- | Compiles a design.
 compile :: FilePath -> Design () -> IO ()
 compile file design = do
-  _ <- execStateT design DesignDB { nextId = 0, path = [], regs = [], rules = [] }
-  undefined
-  writeFile file undefined
+  DesignDB _ _ regs locals rules <- execStateT design DesignDB { nextId = 0, path = [], regs = [], locals = [], rules = [] }
+  putStrLn "Registers:"
+  mapM_ print regs
+  putStrLn "Local expressions:"
+  mapM_ print locals
+  putStrLn "Rules:"
+  mapM_ print rules
+  writeFile file "" --XXX
 
 false :: E
 false = 1%0

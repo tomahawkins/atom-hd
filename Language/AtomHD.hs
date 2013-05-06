@@ -15,50 +15,73 @@ module Language.AtomHD
   -- * Action Stuff
   , cond
   , (<==)
+  , display
+  , finish
   -- * Expressions
   , local
   , (%)
   , true
   , false
+  , empty
+  , (+++)
+  , (#)
+  , (==.)
+  , mux
   -- * Utilities
   , width
+  , bytes
+  , bits
   ) where
 
 import Control.Monad.State hiding (guard)
 import Data.Bits
+import Data.List
+import Text.Printf
 
-infixl 9 %
+infixl 9 %, # -- , !
+infixl 5 +++
+infix  4 ==.
 infixr 1 <==, -:, ==>
 
 type Design = StateT DesignDB IO
 type Action = StateT ActionDB Design
 type Name = String
 
+
 data DesignDB = DesignDB
-  { nextId :: Int
-  , path   :: [Name]
-  , regs   :: [(Int, ([Name], Int, Integer))]
-  , locals :: [(Int, E)]
-  , rules  :: [([Name], E, [(E, E)])]
+  { path   :: [Name]
+  , regs   :: [([Name], (Int, Integer))]
+  , locals :: [([Name], E)]
+  , rules  :: [([Name], E, [Action'])]
   }
 
 data ActionDB = ActionDB
   { guard   :: E
-  , updates :: [(E, E)]
+  , actions :: [Action']
   }
+
+data Action'
+  = Assign E E
+  | Display String [E]
+  | Finish
+  deriving Show
 
 -- | Expressions.
 data E
-  = EConst Int Integer
-  | EReg   Int Int  -- id, width
-  | ELocal Int Int  -- id, width
-  | EAdd   E E
-  | ESub   E E
-  | EMul   E E
-  | ENot   E
-  | EAnd   E E
-  | EOr    E E
-  | EXor   E E
+  = EConst  Int Integer
+  | EReg    [Name] Int  -- width
+  | ELocal  [Name] Int  -- id, width
+  | ESelect Int Int E
+  | EConcat E E
+  | EAdd    E E
+  | ESub    E E
+  | EMul    E E
+  | ENot    E
+  | EAnd    E E
+  | EOr     E E
+  | EXor    E E
+  | EEq     E E
+  | EMux    E E E
   deriving (Show, Eq)
 
 instance Num E where
@@ -82,20 +105,12 @@ instance Bits E where
   isSigned _ = False
 
 
--- | State update.
-(<==) :: E -> E -> Action ()
-a <== b = modify $ \ d -> d { updates = updates d ++ [(a, b)] }
-
--- | Guard conditions.
-cond :: E -> Action ()
-cond a = modify $ \ d -> d { guard = EAnd (guard d) a }
-
 -- | Register declaration.
 reg :: Name -> Int -> Integer -> Design E
 reg name width value = do
   d <- get
-  put d { nextId = nextId d + 1, regs = regs d ++ [(nextId d, (path d ++ [name], width, value))] }
-  return $ EReg (nextId d) width
+  put d { regs = regs d ++ [(path d ++ [name], (width, value))] }
+  return $ EReg (path d ++ [name]) width
 
 -- | FIFO declaration.
 fifo :: Name -> [(Int, Integer)] -> Design E
@@ -109,16 +124,69 @@ name -: design = do
   modify $ \ d -> d { path = init $ path d }
   return a
 
--- | Constant bit vector.
+-- | Create a local expression.
+local :: Name -> E -> Design E
+local name a = do
+  d <- get
+  put d { locals = locals d ++ [(path d ++ [name], a)] }
+  return $ ELocal (path d ++ [name]) (width a)
+
+-- | Defines a state transition rule.
+(==>) :: Name -> Action () -> Design ()
+name ==> rule = do
+  modify $ \ d -> d { path = path d ++ [name] }
+  ActionDB guard actions <- execStateT rule ActionDB { guard = true, actions = [] }
+  modify $ \ d -> d { path = init $ path d, rules = rules d ++ [(path d ++ [name], guard, actions)] }
+
+
+-- | State update.
+(<==) :: E -> E -> Action ()
+a <== b = modify $ \ d -> d { actions = actions d ++ [Assign a b] }
+
+-- | Guard conditions.
+cond :: E -> Action ()
+cond a = modify $ \ d -> d { guard = EAnd (guard d) a }
+
+-- | Display something for simulation.
+display :: String -> [E] -> Action ()
+display str args = modify $ \ d -> d { actions = actions d ++ [Display str args] }
+
+-- | Stop a simulation.
+finish :: Action ()
+finish = modify $ \ d -> d { actions = actions d ++ [Finish] }
+
+-- | Constant bit vector given width and value.
 (%) :: Int -> Integer -> E
 (%) = EConst
 
--- | Create a local expression.
-local :: E -> Design E
-local a = do
-  d <- get
-  put d { nextId = nextId d + 1,  locals = locals d ++ [(nextId d, a)] }
-  return $ ELocal (nextId d) (width a)
+-- | False constant.
+false :: E
+false = 1%0
+
+-- | True constant.
+true :: E
+true = 1%1
+
+-- | An empty (zero width) bit vector.
+empty :: E
+empty = 0%0
+
+-- | Bit vector append.
+(+++) :: E -> E -> E
+(+++) = EConcat
+
+-- | Bit selection.
+(#) :: E -> (Int, Int) -> E
+a # (msb, lsb) = ESelect msb lsb a
+
+-- | Bit vector equality.
+(==.) :: E -> E -> E
+(==.) = EEq
+
+-- | Mux:  mux test onTrue onFalse
+mux :: E -> E -> E -> E
+mux = EMux
+
 
 -- | Width of a bit vector.
 width :: E -> Int
@@ -126,6 +194,8 @@ width a = case a of
   EConst w _ -> w
   EReg   _ w -> w
   ELocal _ w -> w
+  EConcat a b -> width a + width b
+  ESelect msb lsb _ -> msb - lsb + 1
   EAdd   a _ -> width a
   ESub   a _ -> width a
   EMul   a _ -> width a
@@ -133,28 +203,72 @@ width a = case a of
   EAnd   a _ -> width a
   EOr    a _ -> width a
   EXor   a _ -> width a
+  EEq    _ _ -> 1
+  EMux   _ a _ -> width a
 
--- | Defines a state transition rule.
-(==>) :: Name -> Action () -> Design ()
-name ==> rule = do
-  ActionDB guard updates <- execStateT rule ActionDB { guard = false, updates = [] }
-  modify $ \ d -> d { rules = rules d ++ [(path d ++ [name], guard, updates)] }
+-- | Extract the bytes of a bit vector.
+bytes :: E -> [E]
+bytes a = [ a # (lsb + 8, lsb) | lsb <- reverse [0, 8 .. width a - 1] ]  -- Ignores msbs if not divisible by 8.
+
+-- | Extract the bits of a bit vector.
+bits :: E -> [E]
+bits a = [ a # (i, i) | i <- reverse [0 .. width a - 1] ]
+
+
 
 -- | Compiles a design.
 compile :: FilePath -> Design () -> IO ()
-compile file design = do
-  DesignDB _ _ regs locals rules <- execStateT design DesignDB { nextId = 0, path = [], regs = [], locals = [], rules = [] }
-  putStrLn "Registers:"
-  mapM_ print regs
-  putStrLn "Local expressions:"
-  mapM_ print locals
-  putStrLn "Rules:"
-  mapM_ print rules
-  writeFile file "" --XXX
+compile file design = execStateT design DesignDB { path = [], regs = [], locals = [], rules = [] } >>= writeFile file . bsv file
 
-false :: E
-false = 1%0
+var :: [Name] -> String
+var path = intercalate "$" path
 
-true :: E
-true = 1%1
+bsv :: FilePath -> DesignDB -> String
+bsv file (DesignDB _ regs locals rules) = unlines $
+  [ "// Generated by AtomHD."
+  , printf "package %s;" m
+  , printf "module mk%s (Empty);" m
+  , unlines [ printf "Reg#(Bit#(%d)) %s <- mkReg(%d);" w (var path) v | (path, (w, v)) <- regs ]
+  , unlines [ printf "Bit#(%d) %s = %s;" (width a) (var path) (expr a) | (path, a) <- locals ]
+  , unlines $ map rule rules
+  , printf "endmodule"
+  , printf "endpackage"
+  ]
+  where
+  m = takeWhile (/= '.') file
 
+expr :: E -> String
+expr a = case a of
+  EConst w v -> printf "%d'h%x" w v
+  EReg   path _ -> var path
+  ELocal path _ -> var path
+  EConcat a b -> printf "{%s, %s}" (expr a) (expr b)
+  ESelect msb lsb a -> printf "(%s)[%d:%d]" (expr a) msb lsb
+  EAdd   a b -> printf "(%s + %s)"  (expr a) (expr b)
+  ESub   a b -> printf "(%s - %s)"  (expr a) (expr b)
+  EMul   a b -> printf "(%s * %s)"  (expr a) (expr b)
+  ENot   a   -> printf "(~ %s)"     (expr a)
+  EAnd   a b -> printf "(%s & %s)"  (expr a) (expr b)
+  EOr    a b -> printf "(%s | %s)"  (expr a) (expr b)
+  EXor   a b -> printf "(%s ^ %s)"  (expr a) (expr b)
+  EEq    a b -> printf "pack(%s == %s)" (expr a) (expr b)
+  EMux   a b c -> printf "(unpack(%s) ? %s : %s)" (expr a) (expr b) (expr c)
+
+rule :: ([Name], E, [Action']) -> String
+rule (path, guard, actions) = unlines
+  [ printf "rule %s (1'b1 == %s);" (var path) (expr guard)
+  , unlines $ map action actions
+  , printf "endrule"
+  ]
+
+action :: Action' -> String
+action a = case a of
+  Assign a b -> printf "  %s <= %s;" (expr a) (expr b)
+  Display str args -> printf "  $display(\"%s\"%s);" str $ concatMap ((", " ++) . expr) args
+  Finish           -> printf "  $finish;"
+ 
+  {-
+  , regs   :: [(Int, ([Name], Int, Integer))]
+  , locals :: [(Int, ([Name], E))]
+  , rules  :: [([Name], E, [Action'])]
+  -}

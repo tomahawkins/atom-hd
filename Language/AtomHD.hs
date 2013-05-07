@@ -22,10 +22,11 @@ module Language.AtomHD
   , (%)
   , true
   , false
-  , empty
-  , (+++)
+  , module Data.Monoid
   , (#)
+  , (##)
   , (==.)
+  , (/=.)
   , mux
   -- * Utilities
   , width
@@ -36,17 +37,16 @@ module Language.AtomHD
 import Control.Monad.State hiding (guard)
 import Data.Bits
 import Data.List
+import Data.Monoid
 import Text.Printf
 
-infixl 9 %, # -- , !
-infixl 5 +++
-infix  4 ==.
+infixl 9 %, #, ## -- , !
+infix  4 ==., /=.
 infixr 1 <==, -:, ==>
 
 type Design = StateT DesignDB IO
 type Action = StateT ActionDB Design
 type Name = String
-
 
 data DesignDB = DesignDB
   { path   :: [Name]
@@ -104,6 +104,9 @@ instance Bits E where
   bitSize = width
   isSigned _ = False
 
+instance Monoid E where
+  mempty  = 0%0
+  mappend = EConcat
 
 -- | Register declaration.
 reg :: Name -> Int -> Integer -> Design E
@@ -167,21 +170,21 @@ false = 1%0
 true :: E
 true = 1%1
 
--- | An empty (zero width) bit vector.
-empty :: E
-empty = 0%0
-
--- | Bit vector append.
-(+++) :: E -> E -> E
-(+++) = EConcat
-
--- | Bit selection.
+-- | Bit range selection.
 (#) :: E -> (Int, Int) -> E
 a # (msb, lsb) = ESelect msb lsb a
+
+-- | Single bit selection.
+(##) :: E -> Int -> E
+a ## b = a#(b,b)
 
 -- | Bit vector equality.
 (==.) :: E -> E -> E
 (==.) = EEq
+
+-- | Bit vector inequality.
+(/=.) :: E -> E -> E
+a /=. b = complement $ a ==. b
 
 -- | Mux:  mux test onTrue onFalse
 mux :: E -> E -> E -> E

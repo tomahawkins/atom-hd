@@ -54,7 +54,7 @@ import Text.Printf
 
 infixr 9 %, #, ##, !
 infix  4 ==., /=.
-infixr 1 <==, -:, ==>
+infixr 0 <==, -:, ==>
 
 type Design = StateT DesignDB IO
 type Action = StateT ActionDB Design

@@ -20,6 +20,7 @@ module Language.AtomHD
   -- * Action Stuff
   , cond
   , (<==)
+  , assignArray
   , display
   , finish
   , atomically
@@ -113,7 +114,7 @@ instance Num E where
   (-) = EMul
   abs = id
   signum = error "Num E signum not defined."
-  fromInteger = EConst 8
+  fromInteger = EConst 8   -- XXX Not good.  Need unsized values.
 
 instance Bits E where
   (.&.) = EAnd
@@ -204,6 +205,10 @@ methodActionValue name widths width f = do
 -- | State update.
 (<==) :: E -> E -> Action ()
 a <== b = modify $ \ d -> d { actions = actions d ++ [Assign a b] }
+
+-- | Update an entire array.
+assignArray :: E -> [E] -> Action ()
+assignArray a vs = sequence_ [ a ! 8%i <== v | (i, v) <- zip [0 ..] vs ]  --XXX 8%i is not good.  Need to have unsized values.
 
 -- | Guard conditions.
 cond :: E -> Action ()
@@ -308,7 +313,7 @@ size a = case a of
 
 -- | Extract the bytes of a bit vector.
 bytes :: E -> [E]
-bytes a = [ a # (lsb + 8, lsb) | lsb <- reverse [0, 8 .. width a - 1] ]  -- Ignores msbs if not divisible by 8.
+bytes a = [ a # (lsb + 8 - 1, lsb) | lsb <- reverse [0, 8 .. width a - 1] ]  -- Ignores msbs if not divisible by 8.
 
 -- | Extract the bits of a bit vector.
 bits :: E -> [E]

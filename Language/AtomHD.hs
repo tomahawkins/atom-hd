@@ -49,6 +49,7 @@ module Language.AtomHD
 
 import Control.Monad.State hiding (guard, when)
 import Data.Bits
+import Data.Char (toLower)
 import Data.List
 import Data.Monoid
 import Text.Printf
@@ -326,7 +327,9 @@ compile :: FilePath -> Design () -> IO ()
 compile file design = execStateT design DesignDB { path = [], regs = [], arrays = [], locals = [], rules = [], methods = [] } >>= writeFile file . bsv file
 
 var :: [Name] -> String
-var path = intercalate "$" path
+var path = toLower a : b
+  where
+  a : b = intercalate "$" path
 
 bsv :: FilePath -> DesignDB -> String
 bsv file (DesignDB _ regs arrays locals rules methods) = unlines $

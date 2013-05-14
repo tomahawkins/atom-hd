@@ -1,7 +1,8 @@
 module Language.AtomHD
   ( 
   -- * Types
-    Design
+    DesignAction
+  , Design
   , Action
   , E
   , Name
@@ -32,6 +33,7 @@ module Language.AtomHD
   , (%)
   , true
   , false
+  , not_
   , module Data.Monoid
   , (#)
   , (##)
@@ -67,26 +69,25 @@ data DesignDB = DesignDB
   , regs    :: [([Name], Int, Integer)]
   , arrays  :: [([Name], Int, Int, Integer)]
   , locals  :: [([Name], E)]
-  , rules   :: [([Name], E, [([Name], E)], [Action'])]
+  , rules   :: [([Name], E, [Action'])]
   , methods :: [([Name], Method)]
   }
 
 data ActionDB = ActionDB
   { guard   :: E
-  , locals' :: [([Name], E)]
   , actions :: [Action']
   }
 
 data Method
-  = MethodValue       [Int] Int                           E
-  | MethodAction      [Int]     E [([Name], E)] [Action']
-  | MethodActionValue [Int] Int E [([Name], E)] [Action'] E
+  = MethodValue       [Int] Int             E
+  | MethodAction      [Int]     E [Action']
+  | MethodActionValue [Int] Int E [Action'] E
 
 data Action'
   = Assign E E
   | Display String [E]
   | Finish
-  | Atomically E [([Name], E)] [Action']
+  | Atomically E [Action']
   deriving Show
 
 -- | Expressions.
@@ -134,9 +135,12 @@ instance Monoid E where
   mappend = EConcat
 
 -- | Operations valid in both Design and Action monads.
-class DesignAction m where
+class Monad m => DesignAction m where
   -- | Create a local expression.
   local :: Name -> E -> m E
+
+  -- | Create a new namespace.
+  (-:) :: Name -> m a -> m a
 
 instance DesignAction Design where
   local name a = do
@@ -144,11 +148,21 @@ instance DesignAction Design where
     put d { locals = locals d ++ [(path d ++ [name], a)] }
     return $ ELocal (path d ++ [name]) (width a)
 
+  name -: design = do
+    modify $ \ d -> d { path = path d ++ [name] }
+    a <- design
+    modify $ \ d -> d { path = init $ path d }
+    return a
+
+
 instance DesignAction Action where
-  local name a = do
-    d <- lift get
-    modify $ \ e -> e { locals' = locals' e ++ [(path d ++ [name], a)] }
-    return $ ELocal (path d ++ [name]) (width a)
+  local name value = lift $ local name value
+
+  name -: action = do
+    lift $ modify $ \ d -> d { path = path d ++ [name] }
+    a <- action
+    lift $ modify $ \ d -> d { path = init $ path d }
+    return a
 
 -- | Register declaration.
 reg :: Name -> Int -> Integer -> Design E
@@ -168,20 +182,12 @@ array name size width value = do
 fifo :: Name -> [(Int, Integer)] -> Design E
 fifo = undefined
 
--- | Create a scoped namespace.
-(-:) :: Name -> Design a -> Design a
-name -: design = do
-  modify $ \ d -> d { path = path d ++ [name] }
-  a <- design
-  modify $ \ d -> d { path = init $ path d }
-  return a
-
 -- | Defines a state transition rule.
 (==>) :: Name -> Action () -> Design ()
 name ==> rule = do
   modify $ \ d -> d { path = path d ++ [name] }
-  ActionDB guard locals actions <- execStateT rule ActionDB { guard = true, locals' = [], actions = [] }
-  modify $ \ d -> d { path = init $ path d, rules = rules d ++ [(path d ++ [name], guard, locals, actions)] }
+  ActionDB guard actions <- execStateT rule ActionDB { guard = true, actions = [] }
+  modify $ \ d -> d { path = init $ path d, rules = rules d ++ [(path d, guard, actions)] }
 
 -- | A non-state modifying method returning a value.
 methodValue :: Name -> [Int] -> Int -> ([E] -> E) -> Design ()
@@ -193,15 +199,15 @@ methodValue name widths width f = modify $ \ d -> d { methods = methods d ++ [(p
 methodAction :: Name -> [Int] -> ([E] -> Action ()) -> Design ()
 methodAction name widths f = do
   modify $ \ d -> d { path = path d ++ [name] }
-  ((), ActionDB guard locals actions) <- runStateT (f [ ELocal ["arg" ++ show i] w | (w, i) <- zip widths [0 :: Int ..] ]) ActionDB { guard = true, locals' = [], actions = [] }
-  modify $ \ d -> d { path = init $ path d, methods = methods d ++ [(path d, MethodAction widths guard locals actions)] }
+  ((), ActionDB guard actions) <- runStateT (f [ ELocal ["arg" ++ show i] w | (w, i) <- zip widths [0 :: Int ..] ]) ActionDB { guard = true, actions = [] }
+  modify $ \ d -> d { path = init $ path d, methods = methods d ++ [(path d, MethodAction widths guard actions)] }
 
 -- | A state modifying method that returns a value.
 methodActionValue :: Name -> [Int] -> Int -> ([E] -> Action E) -> Design ()
 methodActionValue name widths width f = do
   modify $ \ d -> d { path = path d ++ [name] }
-  (result, ActionDB guard locals actions) <- runStateT (f [ ELocal ["arg" ++ show i] w | (w, i) <- zip widths [0 :: Int ..] ]) ActionDB { guard = true, locals' = [], actions = [] }
-  modify $ \ d -> d { path = init $ path d, methods = methods d ++ [(path d, MethodActionValue widths width guard locals actions result)] }
+  (result, ActionDB guard actions) <- runStateT (f [ ELocal ["arg" ++ show i] w | (w, i) <- zip widths [0 :: Int ..] ]) ActionDB { guard = true, actions = [] }
+  modify $ \ d -> d { path = init $ path d, methods = methods d ++ [(path d, MethodActionValue widths width guard actions result)] }
 
 -- | State update.
 (<==) :: E -> E -> Action ()
@@ -227,8 +233,8 @@ finish = modify $ \ d -> d { actions = actions d ++ [Finish] }
 atomically :: Action () -> Action ()
 atomically action = do
   a <- get
-  ActionDB guard locals actions' <- lift $ execStateT action ActionDB { guard = true, locals' = [], actions = [] }
-  put a { actions = actions a ++ [Atomically guard locals actions'] }
+  ActionDB guard actions' <- lift $ execStateT action ActionDB { guard = true, actions = [] }
+  put a { actions = actions a ++ [Atomically guard actions'] }
 
 -- | Conditional branch within an Action.
 ifelse :: E -> Action () -> Action () -> Action ()
@@ -257,6 +263,10 @@ false = 1%0
 -- | True constant.
 true :: E
 true = 1%1
+
+-- | Negation.
+not_ :: E -> E
+not_ = complement
 
 -- | Bit range selection.
 (#) :: E -> (Int, Int) -> E
@@ -329,7 +339,7 @@ compile file design = execStateT design DesignDB { path = [], regs = [], arrays 
 var :: [Name] -> String
 var path = toLower a : b
   where
-  a : b = intercalate "$" path
+  a : b = intercalate "__" path
 
 bsv :: FilePath -> DesignDB -> String
 bsv file (DesignDB _ regs arrays locals rules methods) = unlines $
@@ -374,15 +384,12 @@ expr a = case a of
   EEq    a b -> printf "pack(%s == %s)" (expr a) (expr b)
   EMux   a b c -> printf "(unpack(%s) ? %s : %s)" (expr a) (expr b) (expr c)
 
-rule :: ([Name], E, [([Name], E)], [Action']) -> String
-rule (path, guard, locals, actions) = unlines
+rule :: ([Name], E, [Action']) -> String
+rule (path, guard, actions) = unlines
   [ printf "rule %s (1'b1 == %s);" (var path) (expr guard)
-  , indent $ unlines $ map local' locals ++ map action actions
+  , indent $ unlines $ map action actions
   , printf "endrule"
   ]
-
-local' :: ([Name], E) -> String
-local' (path, a) = printf "Bit#(%d) %s = %s;" (width a) (var path) (expr a)
 
 method :: ([Name], Method) -> String
 method a@(_, m) = case m of
@@ -391,23 +398,23 @@ method a@(_, m) = case m of
     , printf "  return %s;" (expr result)
     , printf "endmethod"
     ]
-  MethodAction _ guard locals actions -> unlines
+  MethodAction _ guard actions -> unlines
     [ init (methodDecl a) ++ " if (unpack(" ++ expr guard ++ "));"
-    , indent $ unlines $ map local' locals ++ map action actions
+    , indent $ unlines $ map action actions
     , printf "endmethod"
     ]
-  MethodActionValue _ _ guard locals actions result -> unlines
+  MethodActionValue _ _ guard actions result -> unlines
     [ init (methodDecl a) ++ " if (unpack(" ++ expr guard ++ "));"
-    , indent $ unlines $ map local' locals ++ map action actions
+    , indent $ unlines $ map action actions
     , printf "  return %s;" (expr result)
     , printf "endmethod"
     ]
 
 methodDecl :: ([Name], Method) -> String
 methodDecl (path, a) = case a of
-  MethodValue       widths width       _ -> printf "method Bit#(%d) %s%s;"               width (var path) (declArgs widths)
-  MethodAction      widths       _ _ _   -> printf "method Action %s%s;"                       (var path) (declArgs widths)
-  MethodActionValue widths width _ _ _ _ -> printf "method ActionValue#(Bit#(%d)) %s%s;" width (var path) (declArgs widths)
+  MethodValue       widths width     _ -> printf "method Bit#(%d) %s%s;"               width (var path) (declArgs widths)
+  MethodAction      widths       _ _   -> printf "method Action %s%s;"                       (var path) (declArgs widths)
+  MethodActionValue widths width _ _ _ -> printf "method ActionValue#(Bit#(%d)) %s%s;" width (var path) (declArgs widths)
   where
   declArgs widths
     | null widths = ""
@@ -418,9 +425,8 @@ action a = case a of
   Assign a b       -> printf "%s <= %s;" (expr a) (expr b)
   Display str args -> printf "$display(\"%s\"%s);" str $ concatMap ((", " ++) . expr) args
   Finish           -> printf "$finish;"
-  Atomically g l a -> unlines
+  Atomically g a   -> unlines
     [ printf "if (unpack(%s)) begin" (expr g)
-    , indent $ unlines $ map local' l
     , indent $ unlines $ map action a
     , printf "end"
     ]
